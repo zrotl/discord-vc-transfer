@@ -1,7 +1,7 @@
-const { joinVoiceChannel } = require('@discordjs/voice');
-const { SlashCommandBuilder, ChannelType } = require('discord.js');
+import { joinVoiceChannel } from '@discordjs/voice';
+import { SlashCommandBuilder, ChannelType } from 'discord.js';
 
-module.exports = {
+export default {
 	data: new SlashCommandBuilder()
         // コマンドの名前
 		.setName('autocomplete')

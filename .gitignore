@@ -5,3 +5,4 @@ config.json
 .vscode/
 *.mp3
 rec/*
+launch.json

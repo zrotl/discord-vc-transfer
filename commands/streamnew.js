@@ -1,13 +1,22 @@
-import { SlashCommandBuilder, ChannelType } from 'discord.js';
+//const Discord = require('discord.js');
+//const { SlashCommandBuilder, ChannelType } = require('discord.js');
+//const { joinVoiceChannel, createAudioPlayer, NoSubscriberBehavior, EndBehaviorType, createAudioResource, StreamType } = require('@discordjs/voice');
+//const AudioMixer = require('node-audio-mixer');
+//const Prism = require('prism-media');
+//const { PassThrough } = require('stream');
+
+import { Client, SlashCommandBuilder, ChannelType } from 'discord.js';
 import { VoiceConnectionStatus, joinVoiceChannel, createAudioPlayer, NoSubscriberBehavior, EndBehaviorType, createAudioResource, StreamType } from '@discordjs/voice';
 import { AudioMixer } from 'node-audio-mixer';
 import Prism from 'prism-media';
 import { PassThrough } from 'stream';
 
+// const Client = new Client();
+
 export default {
 	data: new SlashCommandBuilder()
         // コマンドの名前
-		.setName('stream')
+		.setName('streamnew')
         // コマンドの説明文
 		.setDescription('VCを中継。')
 		// コマンドのオプションを追加
@@ -41,12 +50,14 @@ export default {
 		const filtered = unSelectedVoiceChannels.filter(unSelectedVoiceChannel => unSelectedVoiceChannel[1].name.startsWith(focusedValue));
 
 		await interaction.respond(
+			
 			filtered.map(unSelectedVoiceChannel => ({ name: unSelectedVoiceChannel[1].name, value: unSelectedVoiceChannel[1].id })).slice(0, 25)
 		);
 	},
 	async execute(interaction, client1, client2) {
 		const voiceChannel1 = interaction.options.getChannel('channel1');
 		const voiceChannel2 = interaction.options.getString('channel2');
+		const memberList = new Map();
 		if (voiceChannel1 && voiceChannel2) {
 			if (voiceChannel1 === voiceChannel2) {
 				await interaction.reply('同じVCには参加できません🥺');
@@ -73,50 +84,14 @@ export default {
 				selfMute: false,
 				selfDeaf: true,
 			});
-		//TODO:bye.jsでこのAudioMixer消さないとだめじゃない？
-		//index.js内で宣言し、ここでconst mixer = global.mixerとでもする？
-		//あるいはここでglobal.mixerをclose→newしておくか。
-			if (global.mixer != null) global.mixer.close();
-			global.mixer = new AudioMixer({
+
+			const mixer = new AudioMixer({
 				sampleRate: 48000,
 				bitDepth: 16,
 				channels: 2,
 				generateSilent: true,
 				autoClose: false,
 			});
-		
-			// Listener-botが参加しているVCで誰かが話し出したら実行
-			connection1.receiver.speaking.on('start', (userId) => {
-				const standaloneInput = global.mixer.createAudioInput({
-					sampleRate: 48000,
-					bitDepth: 16,
-					channels: 2,
-					forceClose: true,
-				});
-				// VCの音声取得機能
-				const audio = connection1.receiver.subscribe(userId, {
-					end: {
-						behavior: EndBehaviorType.AfterSilence,
-						// Opusの場合、100msだと短過ぎるのか、エラー落ちするため1000msに設定
-						// Rawに変換する場合、1000msだと長過ぎるのか、エラー落ちするため100msに設定
-						duration: 400,
-					},
-				});
-				const rawStream = new PassThrough();
-				audio
-					.pipe(new Prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 }))
-					.pipe(rawStream);
-				const p = rawStream.pipe(standaloneInput);
-				rawStream.on('end', () => {
-					if (global.mixer != null) {
-						global.mixer.removeAudioInput(standaloneInput);
-						standaloneInput.close(); //automatically removed from audioMixer.
-						rawStream.destroy();
-						p.destroy();
-					}
-				});
-			});
-			
 			// 音声をVCに流す機能
 			const player = createAudioPlayer({
 				behaviors: {
@@ -124,16 +99,45 @@ export default {
 					noSubscriber: NoSubscriberBehavior.play,
 				},
 			});
-			const resource = createAudioResource(global.mixer,
+			const resource = createAudioResource(mixer,
 				{
 					inputType: StreamType.Raw,
+                    //silencePaddingFrames: -1,
 				},
 			);
 			player.play(resource);
 			connection2.subscribe(player);
-			connection2.on(VoiceConnectionStatus.Destroyed, (oldState, newState) => {
-				global.mixer.close();
+
+			connection2.on(VoiceConnectionStatus.Destroyed, () => {
+				memberList.forEach((voice) => {
+					if (voice !== undefined && voice !== null) voice.destroy();
+				})
+				mixer.close();
 			});
+
+			//TODO:client1がVCに入った時、すでに入っていたmemberの分のAudioInputを作成する
+			//voiceChannel1.members.filter(user => !user.bot).each(user => {
+			voiceChannel1.members.each(user => {
+				if (user.id === client1.user.id) return;
+				memberList.set(user.id, createUserAudioStream(connection1, mixer, user.id));
+			});
+
+			//TODO:ここclient1でいいの？
+            client1.on("voiceStateUpdate", (oldState, newState) => {
+				if (oldState.channelId === voiceChannel1.id && newState.channelId === null) {
+					//disconnect from VC Event
+					console.log('disconnect user: '+oldState.member.user.id);
+					if (oldState.member.user.id === client1.user.id) return;
+					const voice = memberList.get(oldState.member.user.id);
+					if (voice !== undefined && voice !== null) voice.destroy();
+					memberList.delete(oldState.member.user.id);
+				} else if (oldState.channelId === null && newState.channelId === voiceChannel1.id) {
+					//connect to VC Event
+					console.log('connect user: '+newState.member.user.id);
+					if (newState.member.user.id === client1.user.id) return;
+					memberList.set(newState.member.user.id, createUserAudioStream(connection1, mixer, newState.member.user.id));
+				}
+            });
 
 			await interaction.reply('VCを中継します！');
 			return [connection1, connection2];
@@ -144,3 +148,31 @@ export default {
 		// }
 	},
 };
+
+function createUserAudioStream(connection, mixer, userid) {
+	const userInput = mixer.createAudioInput({
+		sampleRate: 48000,
+		bitDepth: 16,
+		channels: 2,
+		forceClose: true,
+	});
+
+	const voice = connection.receiver.subscribe(userid, {
+		end: { behavior: EndBehaviorType.Manual, },
+	});
+	const rawStream = new PassThrough();
+	voice
+		.pipe(new Prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 }))
+		.pipe(rawStream);
+	const p = rawStream.pipe(userInput);
+	rawStream.on('end', () => {
+		if (mixer != null) {
+			mixer.removeAudioInput(userInput);
+			userInput.close(); //automatically removed from audioMixer.
+			rawStream.destroy();
+			p.destroy();
+		}
+	});
+	console.log('create user AudioStream: '+userid);
+	return voice;
+}
